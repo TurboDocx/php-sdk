@@ -9,8 +9,31 @@ The most developer-friendly **DocuSign & PandaDoc alternative** for **e-signatur
 [![Packagist Version](https://img.shields.io/packagist/v/turbodocx/sdk)](https://packagist.org/packages/turbodocx/sdk)
 [![PHP Version](https://img.shields.io/packagist/php-v/turbodocx/sdk)](https://packagist.org/packages/turbodocx/sdk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-agentskills.io-8A2BE2)](https://agentskills.io)
+[![Quickstart Skill](https://skills.sh/b/TurboDocx/quickstart)](https://github.com/TurboDocx/quickstart)
 
 [Website](https://www.turbodocx.com) • [Documentation](https://docs.turbodocx.com/docs) • [API & SDK](https://www.turbodocx.com/products/api-and-sdk) • [Examples](#examples) • [Discord](https://discord.gg/NYKwz4BcpX)
+
+---
+
+## ⚡ Skip the boilerplate — let an agent scaffold it for you
+
+Have an AI coding agent (Claude Code, Cursor, Copilot, Codex, Gemini CLI, OpenCode) install this SDK, configure your env, write working route handlers, and wire them into your app:
+
+```bash
+npx skills add TurboDocx/quickstart
+```
+
+Then run `/turbodocx-sdk` inside your agent — or one of the focused shortcuts:
+
+| Shortcut | What it scaffolds |
+|---|---|
+| `/turbodocx-sdk turbosign` | Send documents for e-signature, check status, download signed PDF |
+| `/turbodocx-sdk deliverable` | Generate documents from templates with variable substitution |
+| `/turbodocx-sdk turbopartner` | Provision and manage customer organizations (partner accounts) |
+| `/turbodocx-sdk turbowebhooks` | Subscribe to `signature.document.completed` events + verify HMAC |
+
+The skill auto-detects your framework (Laravel, Symfony, …) and follows your existing project conventions. Source: [github.com/TurboDocx/quickstart](https://github.com/TurboDocx/quickstart).
 
 ---
 
@@ -347,6 +370,106 @@ foreach ($audit->auditTrail as $entry) {
 ```
 
 The audit trail includes a cryptographic hash chain for tamper-evidence verification.
+
+---
+
+### TurboWebhooks (Signature Webhook)
+
+The `TurboWebhooks` class manages your organization's **signature webhook** — a single subscription to TurboDocx signature events (`signature.document.completed`, `signature.document.voided`). It also exposes a `verifyWebhookSignature` helper for incoming webhook receivers.
+
+> **One webhook per org.** The SDK manages a single fixed-name webhook (`signature`) per org so SDK-managed and UI-managed webhooks stay in sync — what you create here also appears in the dashboard's Signature Webhooks settings page. To manage multiple webhooks per org, call the REST API directly.
+>
+> **Requires administrator role.** All webhook routes require an admin TDX- API key.
+
+#### Configuration
+
+```php
+use TurboDocx\TurboWebhooks;
+
+TurboWebhooks::configureFromCredentials(
+    apiKey: getenv('TURBODOCX_API_KEY'),
+    orgId: getenv('TURBODOCX_ORG_ID'),
+    // baseUrl: 'http://localhost:3000', // optional, defaults to https://api.turbodocx.com
+);
+```
+
+Unlike `TurboSign`, `TurboWebhooks` does NOT require `senderEmail` — webhook routes don't send signature emails.
+
+#### Create the signature webhook (save the secret immediately)
+
+```php
+$created = TurboWebhooks::createWebhook(
+    urls: ['https://your-server.example.com/webhooks/turbodocx'],  // HTTPS only
+    events: ['signature.document.completed', 'signature.document.voided'],
+);
+// `secret` is shown ONCE here. Store it securely; it cannot be retrieved later.
+echo "Save this secret: {$created['secret']}";
+```
+
+If the signature webhook already exists, `createWebhook` throws `ConflictException` (HTTP 409). Either update the existing one with `updateWebhook` or `deleteWebhook` first.
+
+#### Get, update, delete
+
+```php
+$webhook = TurboWebhooks::getWebhook();
+// $webhook['deliveryStats'] and $webhook['availableEvents'] are included
+
+TurboWebhooks::updateWebhook(isActive: false);
+TurboWebhooks::deleteWebhook();
+```
+
+#### Test deliveries and replay
+
+```php
+$tested = TurboWebhooks::testWebhook(
+    eventType: 'signature.document.completed',
+    payload: ['documentId' => 'doc-xyz', 'status' => 'completed'],
+);
+// $tested['summary']: ['total' => N, 'successful' => N, 'failed' => N]
+
+$deliveries = TurboWebhooks::listWebhookDeliveries(limit: 10);
+$replayed = TurboWebhooks::replayWebhookDelivery($deliveries['results'][0]['id']);
+```
+
+#### Rotate the secret
+
+```php
+$rotated = TurboWebhooks::regenerateWebhookSecret();
+// $rotated['secret'] is the new secret. Old signatures will fail immediately.
+```
+
+#### Aggregate stats
+
+```php
+$stats = TurboWebhooks::getWebhookStats(days: 30);
+// $stats['summary']['successRate'], $stats['eventBreakdown']
+```
+
+#### Verify incoming webhook signatures
+
+Webhook deliveries from TurboDocx are signed with HMAC-SHA256 over `"{$timestamp}.{$rawBody}"` using your webhook secret. Use `verifyWebhookSignature` to verify them in your receiver:
+
+```php
+use function TurboDocx\Utils\verifyWebhookSignature;
+
+// In your webhook endpoint:
+$rawBody = file_get_contents('php://input');  // CRITICAL: raw bytes only.
+                                              // Do NOT json_decode first; the
+                                              // signature is over the exact bytes.
+$signature = $_SERVER['HTTP_X_TURBODOCX_SIGNATURE'] ?? '';
+$timestamp = $_SERVER['HTTP_X_TURBODOCX_TIMESTAMP'] ?? '';
+$secret = getenv('TURBODOCX_WEBHOOK_SECRET');
+
+if (!verifyWebhookSignature($rawBody, $signature, $timestamp, $secret)) {
+    http_response_code(401);
+    exit('invalid signature');
+}
+
+$event = json_decode($rawBody, true);
+// ... process event ...
+```
+
+By default the helper enforces a 300-second timestamp tolerance to prevent replay attacks. Pass `toleranceSeconds: N` (0 disables the check — not recommended in production).
 
 ---
 
